@@ -1,0 +1,129 @@
+function fetchStockData(ticker, fromDateTime, toDateTime) {
+  
+  // PUT YOUR API KEY IN THE SPACE BELOW
+  var apiKey = "INSERT API KEY HERE";
+
+  // Format dates as YYYY-MM-DD for the API URL
+  var fromDateFormatted = Utilities.formatDate(fromDateTime, "GMT", "yyyy-MM-dd");
+  var toDateFormatted = Utilities.formatDate(toDateTime, "GMT", "yyyy-MM-dd");
+
+  var url = `https://api.polygon.io/v2/aggs/ticker/${ticker}/range/1/minute/${fromDateFormatted}/${toDateFormatted}?adjusted=true&sort=asc&apiKey=${apiKey}`;
+  var response = UrlFetchApp.fetch(url, {muteHttpExceptions: true});
+  var data = JSON.parse(response.getContentText());
+
+  if (data.status !== 'OK') {
+    Logger.log(`Error fetching data for ${ticker}: ${data.error}`);
+    throw new Error(`Error fetching data for ${ticker}: ${data.error}`);
+  }
+
+  var results = data.results || [];
+  if (results.length === 0) {
+    Logger.log(`No data found for ${ticker} for the given time period.`);
+    throw new Error(`No data found for ${ticker} for the given time period.`);
+  }
+
+  var output = [['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']];
+  Logger.log(`Processing ${results.length} results for ${ticker} from ${fromDateFormatted} to ${toDateFormatted}`);
+
+  results.forEach(function(result) {
+    var timestamp = new Date(result.t);
+    var estTimestampStr = Utilities.formatDate(timestamp, 'America/New_York', 'yyyy-MM-dd HH:mm:ss');
+    var estTimestamp = new Date(estTimestampStr);
+    var estHour = estTimestamp.getHours();
+
+    if ((fromDateTime.getHours() <= estHour && estHour < toDateTime.getHours()) ||
+        (fromDateTime.getHours() === estHour && fromDateTime.getMinutes() <= estTimestamp.getMinutes()) ||
+        (toDateTime.getHours() === estHour && toDateTime.getMinutes() > estTimestamp.getMinutes())) {
+      output.push([
+        estTimestampStr,
+        result.o,
+        result.h,
+        result.l,
+        result.c,
+        result.v
+      ]);
+    }
+  });
+
+  Logger.log(`Filtered data count: ${output.length - 1}`);
+  return output;
+}
+
+function importStockData() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var data = sheet.getRange("A4:C" + sheet.getLastRow()).getValues();
+  var resultsSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Results') || SpreadsheetApp.getActiveSpreadsheet().insertSheet('Results');
+  resultsSheet.clear();
+
+  var header = [['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']];
+  resultsSheet.getRange(1, 1, 1, header[0].length).setValues(header);
+
+  var rowIndex = 2;
+  var batchSize = 5;
+
+  for (var i = 0; i < data.length; i += batchSize) {
+    var batch = data.slice(i, i + batchSize);
+
+    batch.forEach(function(row) {
+      var ticker = row[0];
+      var dateStr = row[1];
+      var period = row[2] ? row[2].toLowerCase() : '';
+
+      if (!ticker || !dateStr || !period) {
+        Logger.log(`Skipping row due to missing data: ${row}`);
+        return;
+      }
+
+      var dateTimeRange = parseDateTimeInEST(dateStr, period);
+
+      try {
+        var stockData = fetchStockData(ticker, dateTimeRange.start, dateTimeRange.end);
+        
+        var title = [[`${ticker}, ${dateStr}, ${period.charAt(0).toUpperCase() + period.slice(1)} Trading`]];
+        resultsSheet.getRange(rowIndex, 1, 1, title[0].length).setValues(title);
+        resultsSheet.getRange(rowIndex, 1, 1, title[0].length).setFontWeight('bold');
+        rowIndex++;
+
+        stockData.slice(1).forEach(function(dataRow) {
+          resultsSheet.getRange(rowIndex, 1, 1, dataRow.length).setValues([dataRow]);
+          rowIndex++;
+        });
+
+        rowIndex++;
+      } catch (e) {
+        SpreadsheetApp.getUi().alert(e.message);
+      }
+    });
+
+    if (i + batchSize < data.length) {
+      Logger.log(`Waiting for 70 seconds to avoid rate limiting...`);
+      Utilities.sleep(70000);
+    }
+  }
+}
+
+function parseDateTimeInEST(dateStr, period) {
+  var startDateTime = new Date(dateStr);
+  var endDateTime = new Date(dateStr);
+  
+  if (period === 'before') {
+    startDateTime.setHours(7, 0, 0);
+    endDateTime.setHours(8, 0, 0);
+  } else if (period === 'after') {
+    startDateTime.setHours(16, 0, 0);
+    endDateTime.setHours(17, 0, 0);
+  } else if (period === 'all') {
+    startDateTime.setHours(0, 0, 0);
+    endDateTime.setHours(23, 59, 59);
+  }
+  
+  Logger.log(`Parsed DateTime for ${period} trading: Start - ${startDateTime}, End - ${endDateTime}`);
+  return { start: startDateTime, end: endDateTime };
+}
+
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('Stock Data')
+      .addItem('Import Stock Data', 'importStockData')
+      .addToUi();
+}
